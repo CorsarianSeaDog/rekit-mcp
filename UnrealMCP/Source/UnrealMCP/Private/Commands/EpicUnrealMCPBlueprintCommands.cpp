@@ -29,6 +29,31 @@
 #include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
 
+static FString GetVariableTypeString(const FEdGraphPinType& VarType)
+{
+    FString KeyType = VarType.PinCategory.ToString();
+    if (VarType.PinSubCategoryObject.IsValid())
+    {
+        KeyType = VarType.PinSubCategoryObject->GetName();
+    }
+
+    switch (VarType.ContainerType)
+    {
+        case EPinContainerType::Array: return FString::Printf(TEXT("Array<%s>"), *KeyType);
+        case EPinContainerType::Set:   return FString::Printf(TEXT("Set<%s>"), *KeyType);
+        case EPinContainerType::Map:
+        {
+            FString ValueType = VarType.PinValueType.TerminalCategory.ToString();
+            if (VarType.PinValueType.TerminalSubCategoryObject.IsValid())
+            {
+                ValueType = VarType.PinValueType.TerminalSubCategoryObject->GetName();
+            }
+            return FString::Printf(TEXT("Map<%s, %s>"), *KeyType, *ValueType);
+        }
+        default: return KeyType;
+    }
+}
+
 FEpicUnrealMCPBlueprintCommands::FEpicUnrealMCPBlueprintCommands()
 {
 }
@@ -100,6 +125,14 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleCommand(const FSt
     else if (CommandType == TEXT("get_blueprint_function_details"))
     {
         return HandleGetBlueprintFunctionDetails(Params);
+    }
+    else if (CommandType == TEXT("set_blueprint_component_class"))
+    {
+        return HandleSetBlueprintComponentClass(Params);
+    }
+    else if (CommandType == TEXT("get_blueprint_component_properties"))
+    {
+        return HandleGetBlueprintComponentProperties(Params);
     }
 
     return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown blueprint command: %s"), *CommandType));
@@ -1197,9 +1230,14 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleReadBlueprintCont
         {
             TSharedPtr<FJsonObject> VarObj = MakeShared<FJsonObject>();
             VarObj->SetStringField(TEXT("name"), Variable.VarName.ToString());
-            VarObj->SetStringField(TEXT("type"), Variable.VarType.PinCategory.ToString());
+            VarObj->SetStringField(TEXT("type"), GetVariableTypeString(Variable.VarType));
             VarObj->SetStringField(TEXT("default_value"), Variable.DefaultValue);
+            VarObj->SetStringField(TEXT("category"), Variable.Category.ToString());
             VarObj->SetBoolField(TEXT("is_editable"), (Variable.PropertyFlags & CPF_Edit) != 0);
+            VarObj->SetBoolField(TEXT("is_editable_in_instance"), (Variable.PropertyFlags & CPF_DisableEditOnInstance) == 0);
+            VarObj->SetBoolField(TEXT("expose_on_spawn"), (Variable.PropertyFlags & CPF_ExposeOnSpawn) != 0);
+            VarObj->SetBoolField(TEXT("is_config"), (Variable.PropertyFlags & CPF_Config) != 0);
+            VarObj->SetBoolField(TEXT("save_game"), (Variable.PropertyFlags & CPF_SaveGame) != 0);
             VariableArray.Add(MakeShared<FJsonValueObject>(VarObj));
         }
         ResultObj->SetArrayField(TEXT("variables"), VariableArray);
@@ -1274,11 +1312,39 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleReadBlueprintCont
                     TSharedPtr<FJsonObject> CompObj = MakeShared<FJsonObject>();
                     CompObj->SetStringField(TEXT("name"), Node->GetVariableName().ToString());
                     CompObj->SetStringField(TEXT("class"), Node->ComponentTemplate->GetClass()->GetName());
+                    CompObj->SetStringField(TEXT("class_path"), Node->ComponentTemplate->GetClass()->GetPathName());
                     CompObj->SetBoolField(TEXT("is_root"), Node == Blueprint->SimpleConstructionScript->GetDefaultSceneRootNode());
+                    CompObj->SetBoolField(TEXT("is_native"), false);
                     ComponentArray.Add(MakeShared<FJsonValueObject>(CompObj));
                 }
             }
         }
+
+        // Also include native C++ components from the parent class CDO.
+        // SimpleConstructionScript only contains Blueprint-added components;
+        // components created in C++ constructors are only visible via the CDO.
+        if (Blueprint->GeneratedClass)
+        {
+            if (AActor* CDO = Cast<AActor>(Blueprint->GeneratedClass->GetDefaultObject(false)))
+            {
+                TArray<UActorComponent*> AllComponents;
+                CDO->GetComponents(AllComponents);
+                for (UActorComponent* Comp : AllComponents)
+                {
+                    if (IsValid(Comp) && Comp->CreationMethod == EComponentCreationMethod::Native)
+                    {
+                        TSharedPtr<FJsonObject> CompObj = MakeShared<FJsonObject>();
+                        CompObj->SetStringField(TEXT("name"), Comp->GetFName().ToString());
+                        CompObj->SetStringField(TEXT("class"), Comp->GetClass()->GetName());
+                        CompObj->SetStringField(TEXT("class_path"), Comp->GetClass()->GetPathName());
+                        CompObj->SetBoolField(TEXT("is_root"), false);
+                        CompObj->SetBoolField(TEXT("is_native"), true);
+                        ComponentArray.Add(MakeShared<FJsonValueObject>(CompObj));
+                    }
+                }
+            }
+        }
+
         ResultObj->SetArrayField(TEXT("components"), ComponentArray);
     }
 
@@ -1395,6 +1461,15 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleAnalyzeBlueprintG
                         PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
                         PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"));
                         PinObj->SetNumberField(TEXT("connections"), Pin->LinkedTo.Num());
+                        if (!Pin->DefaultValue.IsEmpty())
+                        {
+                            PinObj->SetStringField(TEXT("default_value"), Pin->DefaultValue);
+                        }
+                        if (Pin->DefaultObject)
+                        {
+                            PinObj->SetStringField(TEXT("default_object"), Pin->DefaultObject->GetName());
+                            PinObj->SetStringField(TEXT("default_object_path"), Pin->DefaultObject->GetPathName());
+                        }
                         
                         // Record connections for this pin
                         for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
@@ -1462,8 +1537,47 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetBlueprintVaria
 
         TSharedPtr<FJsonObject> VarObj = MakeShared<FJsonObject>();
         VarObj->SetStringField(TEXT("name"), Variable.VarName.ToString());
-        VarObj->SetStringField(TEXT("type"), Variable.VarType.PinCategory.ToString());
+        VarObj->SetStringField(TEXT("type"), GetVariableTypeString(Variable.VarType));
         VarObj->SetStringField(TEXT("sub_category"), Variable.VarType.PinSubCategory.ToString());
+
+        // Actual class/struct/enum name for object/struct/enum types
+        if (Variable.VarType.PinSubCategoryObject.IsValid())
+        {
+            VarObj->SetStringField(TEXT("object_class"), Variable.VarType.PinSubCategoryObject->GetName());
+            VarObj->SetStringField(TEXT("object_path"), Variable.VarType.PinSubCategoryObject->GetPathName());
+        }
+        else
+        {
+            VarObj->SetStringField(TEXT("object_class"), TEXT(""));
+            VarObj->SetStringField(TEXT("object_path"), TEXT(""));
+        }
+
+        // Container type: None / Array / Set / Map
+        FString ContainerTypeStr;
+        switch (Variable.VarType.ContainerType)
+        {
+            case EPinContainerType::Array: ContainerTypeStr = TEXT("Array"); break;
+            case EPinContainerType::Set:   ContainerTypeStr = TEXT("Set");   break;
+            case EPinContainerType::Map:   ContainerTypeStr = TEXT("Map");   break;
+            default:                       ContainerTypeStr = TEXT("None");  break;
+        }
+        VarObj->SetStringField(TEXT("container_type"), ContainerTypeStr);
+
+        // For Map: value type info
+        if (Variable.VarType.ContainerType == EPinContainerType::Map)
+        {
+            VarObj->SetStringField(TEXT("map_value_type"), Variable.VarType.PinValueType.TerminalCategory.ToString());
+            VarObj->SetStringField(TEXT("map_value_sub_category"), Variable.VarType.PinValueType.TerminalSubCategory.ToString());
+            if (Variable.VarType.PinValueType.TerminalSubCategoryObject.IsValid())
+            {
+                VarObj->SetStringField(TEXT("map_value_object_class"), Variable.VarType.PinValueType.TerminalSubCategoryObject->GetName());
+            }
+            else
+            {
+                VarObj->SetStringField(TEXT("map_value_object_class"), TEXT(""));
+            }
+        }
+
         VarObj->SetStringField(TEXT("default_value"), Variable.DefaultValue);
         VarObj->SetStringField(TEXT("friendly_name"), Variable.FriendlyName.IsEmpty() ? Variable.VarName.ToString() : Variable.FriendlyName);
         
@@ -1479,9 +1593,11 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetBlueprintVaria
 
         // Property flags
         VarObj->SetBoolField(TEXT("is_editable"), (Variable.PropertyFlags & CPF_Edit) != 0);
+        VarObj->SetBoolField(TEXT("expose_on_spawn"), (Variable.PropertyFlags & CPF_ExposeOnSpawn) != 0);
         VarObj->SetBoolField(TEXT("is_blueprint_visible"), (Variable.PropertyFlags & CPF_BlueprintVisible) != 0);
         VarObj->SetBoolField(TEXT("is_editable_in_instance"), (Variable.PropertyFlags & CPF_DisableEditOnInstance) == 0);
         VarObj->SetBoolField(TEXT("is_config"), (Variable.PropertyFlags & CPF_Config) != 0);
+        VarObj->SetBoolField(TEXT("save_game"), (Variable.PropertyFlags & CPF_SaveGame) != 0);
 
         // Replication
         VarObj->SetNumberField(TEXT("replication"), (int32)Variable.ReplicationCondition);
@@ -1639,5 +1755,200 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetBlueprintFunct
     }
 
     ResultObj->SetBoolField(TEXT("success"), true);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleSetBlueprintComponentClass(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+
+    FString ComponentName;
+    if (!Params->TryGetStringField(TEXT("component_name"), ComponentName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'component_name' parameter"));
+    }
+
+    FString NewClassName;
+    if (!Params->TryGetStringField(TEXT("new_class"), NewClassName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'new_class' parameter"));
+    }
+
+    UBlueprint* Blueprint = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    // Find the existing SCS node by component name
+    USCS_Node* OldNode = nullptr;
+    for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+    {
+        if (IsValid(Node) && Node->GetVariableName().ToString() == ComponentName)
+        {
+            OldNode = Node;
+            break;
+        }
+    }
+
+    if (!OldNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+    }
+
+    // Resolve the new class.
+    // If the name starts with '/' treat it as a Blueprint asset path.
+    UClass* NewClass = nullptr;
+    if (NewClassName.StartsWith(TEXT("/")))
+    {
+        FString AssetName = FPaths::GetBaseFilename(NewClassName);
+        FString ObjectPath = FString::Printf(TEXT("%s.%s"), *NewClassName, *AssetName);
+        UBlueprint* ComponentBlueprint = LoadObject<UBlueprint>(nullptr, *ObjectPath);
+        if (IsValid(ComponentBlueprint) && IsValid(ComponentBlueprint->GeneratedClass))
+        {
+            NewClass = ComponentBlueprint->GeneratedClass;
+        }
+    }
+
+    // Otherwise treat it as a C++ class name (with or without 'U' prefix)
+    if (!NewClass)
+    {
+        NewClass = FindObject<UClass>(nullptr, *NewClassName);
+    }
+    if (!NewClass && !NewClassName.StartsWith(TEXT("U")))
+    {
+        NewClass = FindObject<UClass>(nullptr, *(TEXT("U") + NewClassName));
+    }
+
+    if (!NewClass || !NewClass->IsChildOf(UActorComponent::StaticClass()))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown component class: %s"), *NewClassName));
+    }
+
+    // Remove the old node
+    Blueprint->SimpleConstructionScript->RemoveNode(OldNode);
+
+    // Create a new node with the same variable name
+    USCS_Node* NewNode = Blueprint->SimpleConstructionScript->CreateNode(NewClass, *ComponentName);
+    if (!NewNode)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create new component node"));
+    }
+
+    Blueprint->SimpleConstructionScript->AddNode(NewNode);
+
+    FKismetEditorUtilities::CompileBlueprint(Blueprint);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetStringField(TEXT("component_name"), ComponentName);
+    ResultObj->SetStringField(TEXT("new_class"), NewClassName);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetBlueprintComponentProperties(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+
+    FString ComponentName;
+    if (!Params->TryGetStringField(TEXT("component_name"), ComponentName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'component_name' parameter"));
+    }
+
+    UBlueprint* Blueprint = FEpicUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    // Find the SCS node
+    USCS_Node* TargetNode = nullptr;
+    if (Blueprint->SimpleConstructionScript)
+    {
+        for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+        {
+            if (IsValid(Node) && Node->GetVariableName().ToString() == ComponentName)
+            {
+                TargetNode = Node;
+                break;
+            }
+        }
+    }
+
+    UActorComponent* Template = nullptr;
+
+    if (TargetNode)
+    {
+        Template = TargetNode->ComponentTemplate;
+        if (!IsValid(Template))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Component template is invalid"));
+        }
+    }
+    else
+    {
+        // Not found in SCS — fall back to native C++ components from CDO
+        if (Blueprint->GeneratedClass)
+        {
+            if (AActor* CDO = Cast<AActor>(Blueprint->GeneratedClass->GetDefaultObject(false)))
+            {
+                TArray<UActorComponent*> AllComponents;
+                CDO->GetComponents(AllComponents);
+                for (UActorComponent* Comp : AllComponents)
+                {
+                    if (IsValid(Comp) && Comp->CreationMethod == EComponentCreationMethod::Native
+                        && Comp->GetFName().ToString() == ComponentName)
+                    {
+                        Template = Comp;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!IsValid(Template))
+        {
+            return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+        }
+    }
+
+    UClass* CompClass = Template->GetClass();
+    TSharedPtr<FJsonObject> PropertiesObj = MakeShared<FJsonObject>();
+
+    // Iterate all editable/blueprint-visible properties via reflection
+    for (TFieldIterator<FProperty> It(CompClass); It; ++It)
+    {
+        FProperty* Prop = *It;
+
+        // Skip properties that aren't user-facing
+        const bool bEditable = (Prop->PropertyFlags & CPF_Edit) != 0;
+        const bool bBlueprintVisible = (Prop->PropertyFlags & CPF_BlueprintVisible) != 0;
+        if (!bEditable && !bBlueprintVisible)
+        {
+            continue;
+        }
+
+        // Export the value to string using UE's built-in text export
+        FString ValueStr;
+        const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Template);
+        Prop->ExportTextItem_Direct(ValueStr, ValuePtr, nullptr, nullptr, PPF_None);
+
+        PropertiesObj->SetStringField(Prop->GetName(), ValueStr);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetStringField(TEXT("component_name"), ComponentName);
+    ResultObj->SetStringField(TEXT("component_class"), CompClass->GetPathName());
+    ResultObj->SetObjectField(TEXT("properties"), PropertiesObj);
     return ResultObj;
 }

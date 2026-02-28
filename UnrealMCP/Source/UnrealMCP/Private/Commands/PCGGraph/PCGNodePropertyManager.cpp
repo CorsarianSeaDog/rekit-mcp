@@ -289,7 +289,7 @@ bool FPCGNodePropertyManager::SetPropertyValue(
         FString StrValue;
         if (JsonValue->TryGetString(StrValue))
         {
-            const TCHAR* Result = Property->ImportText(*StrValue, ValuePtr, PPF_None, Object);
+            const TCHAR* Result = Property->ImportText_Direct(*StrValue, ValuePtr, Object, PPF_None);
             if (Result != nullptr)
             {
                 OutPropertyType = FString::Printf(TEXT("Struct(%s)"), *Struct->GetName());
@@ -315,7 +315,7 @@ bool FPCGNodePropertyManager::SetPropertyValue(
     FString StrValue;
     if (JsonValue->TryGetString(StrValue))
     {
-        const TCHAR* Result = Property->ImportText(*StrValue, ValuePtr, PPF_None, Object);
+        const TCHAR* Result = Property->ImportText_Direct(*StrValue, ValuePtr, Object, PPF_None);
         if (Result != nullptr)
         {
             OutPropertyType = Property->GetCPPType();
@@ -404,7 +404,9 @@ TSharedPtr<FJsonObject> FPCGNodePropertyManager::SetNodeProperty(const TSharedPt
 
     // Mark as modified
     Settings->MarkPackageDirty();
-    Graph->NotifyGraphChanged(EPCGChangeType::Settings);
+    #if WITH_EDITOR
+    Graph->ForceNotificationForEditor(EPCGChangeType::Settings);
+#endif
     Graph->GetPackage()->MarkPackageDirty();
 
     TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
@@ -586,7 +588,7 @@ bool FPCGNodePropertyManager::SetStructPropertyValue(
     FString StrValue;
     if (JsonValue->TryGetString(StrValue))
     {
-        const TCHAR* Result = Property->ImportText(*StrValue, ValuePtr, PPF_None, nullptr);
+        const TCHAR* Result = Property->ImportText_Direct(*StrValue, ValuePtr, nullptr, PPF_None);
         if (Result != nullptr)
         {
             OutPropertyType = Property->GetCPPType();
@@ -871,7 +873,9 @@ TSharedPtr<FJsonObject> FPCGNodePropertyManager::SetSpawnerEntries(const TShared
 
     // Mark as modified
     Settings->MarkPackageDirty();
-    Graph->NotifyGraphChanged(EPCGChangeType::Settings);
+    #if WITH_EDITOR
+    Graph->ForceNotificationForEditor(EPCGChangeType::Settings);
+#endif
     Graph->GetPackage()->MarkPackageDirty();
 
     TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);

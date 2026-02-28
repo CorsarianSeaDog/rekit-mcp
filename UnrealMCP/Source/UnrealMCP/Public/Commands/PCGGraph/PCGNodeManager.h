@@ -4,6 +4,8 @@
 #include "Dom/JsonObject.h"
 
 class UPCGSettings;
+class UPCGNode;
+class UPCGGraph;
 
 /**
  * Manages adding and deleting nodes in PCG graphs.

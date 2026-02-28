@@ -264,7 +264,9 @@ TSharedPtr<FJsonObject> FPCGNodeManager::AddNode(const TSharedPtr<FJsonObject>& 
     NewNode->SetNodePosition(PosX, PosY);
 
     // Notify the graph editor
-    Graph->NotifyGraphChanged(EPCGChangeType::Structural);
+    #if WITH_EDITOR
+    Graph->ForceNotificationForEditor(EPCGChangeType::Structural);
+#endif
     Graph->GetPackage()->MarkPackageDirty();
 
     // Build response
@@ -335,7 +337,9 @@ TSharedPtr<FJsonObject> FPCGNodeManager::DeleteNode(const TSharedPtr<FJsonObject
     }
 
     Graph->RemoveNode(Node);
-    Graph->NotifyGraphChanged(EPCGChangeType::Structural);
+    #if WITH_EDITOR
+    Graph->ForceNotificationForEditor(EPCGChangeType::Structural);
+#endif
     Graph->GetPackage()->MarkPackageDirty();
 
     TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);

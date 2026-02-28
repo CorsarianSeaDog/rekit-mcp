@@ -1042,6 +1042,65 @@ def add_component_to_blueprint(
         return {"success": False, "message": str(e)}
 
 @mcp.tool()
+def set_blueprint_component_class(
+    blueprint_name: str,
+    component_name: str,
+    new_class: str,
+) -> Dict[str, Any]:
+    """Replace an existing component in a Blueprint with a new class, keeping the same variable name.
+
+    Args:
+        blueprint_name: Name or full asset path of the Blueprint (e.g. "/Game/_Game/Actors/BP_MyActor").
+        component_name: Variable name of the component to replace (e.g. "QuestsKeeperComponent").
+        new_class: New component class. Either a Blueprint asset path ("/Game/_Game/...BP_NewComp")
+                   or a C++ class name ("UStaticMeshComponent" / "StaticMeshComponent").
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        params = {
+            "blueprint_name": blueprint_name,
+            "component_name": component_name,
+            "new_class": new_class,
+        }
+        response = unreal.send_command("set_blueprint_component_class", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"set_blueprint_component_class error: {e}")
+        return {"success": False, "message": str(e)}
+
+@mcp.tool()
+def get_blueprint_component_properties(
+    blueprint_name: str,
+    component_name: str,
+) -> Dict[str, Any]:
+    """Read all editable/Blueprint-visible properties of a component template in a Blueprint.
+
+    Args:
+        blueprint_name: Name or full asset path of the Blueprint (e.g. "/Game/_Game/Actors/BP_MyActor").
+        component_name: Variable name of the component (e.g. "QuestsKeeperComponent").
+
+    Returns:
+        Dict with 'component_class' and 'properties' (property_name -> value string).
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        params = {
+            "blueprint_name": blueprint_name,
+            "component_name": component_name,
+        }
+        response = unreal.send_command("get_blueprint_component_properties", params)
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"get_blueprint_component_properties error: {e}")
+        return {"success": False, "message": str(e)}
+
+@mcp.tool()
 def set_static_mesh_properties(
     blueprint_name: str,
     component_name: str,
@@ -1256,46 +1315,6 @@ def get_blueprint_variable_details(
         
     except Exception as e:
         logger.error(f"get_blueprint_variable_details error: {e}")
-        return {"success": False, "message": str(e)}
-
-@mcp.tool()
-def get_blueprint_function_details(
-    blueprint_path: str,
-    function_name: str = None,
-    include_graph: bool = True
-) -> Dict[str, Any]:
-    """
-    Get detailed information about Blueprint functions including parameters,
-    return values, local variables, and function graph content.
-    
-    Args:
-        blueprint_path: Full path to the Blueprint asset
-        function_name: Specific function name (if None, returns all functions)
-        include_graph: Include the function's graph nodes and connections
-    
-    Returns:
-        Dictionary with function details including signature and graph content
-    """
-    unreal = get_unreal_connection()
-    if not unreal:
-        return {"success": False, "message": "Failed to connect to Unreal Engine"}
-    
-    try:
-        params = {
-            "blueprint_path": blueprint_path,
-            "function_name": function_name,
-            "include_graph": include_graph
-        }
-        
-        logger.info(f"Getting Blueprint function details: {blueprint_path}")
-        if function_name:
-            logger.info(f"  - Specific function: {function_name}")
-        
-        response = unreal.send_command("get_blueprint_function_details", params)
-        return response or {"success": False, "message": "No response from Unreal"}
-        
-    except Exception as e:
-        logger.error(f"get_blueprint_function_details error: {e}")
         return {"success": False, "message": str(e)}
 
 

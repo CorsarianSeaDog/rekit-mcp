@@ -89,32 +89,3 @@ def get_blueprint_variable_details_helper(
         params["variable_name"] = variable_name
 
     return unreal_connection.send_command("get_blueprint_variable_details", params)
-
-
-def get_blueprint_function_details_helper(
-    unreal_connection,
-    blueprint_path: str,
-    function_name: Optional[str] = None,
-    include_graph: bool = True
-) -> Dict[str, Any]:
-    """
-    Get detailed information about Blueprint functions.
-
-    Args:
-        unreal_connection: Active Unreal Engine connection
-        blueprint_path: Path to the Blueprint asset
-        function_name: Specific function name (None for all functions)
-        include_graph: Include function graph details
-
-    Returns:
-        Dictionary with function details
-    """
-    params = {
-        "blueprint_path": blueprint_path,
-        "include_graph": include_graph
-    }
-
-    if function_name is not None:
-        params["function_name"] = function_name
-
-    return unreal_connection.send_command("get_blueprint_function_details", params)

@@ -133,7 +133,9 @@ TSharedPtr<FJsonObject> FPCGParameterManager::AddGraphParameter(const TSharedPtr
     // Add the parameter to the graph
     Graph->AddUserParameters(Descs);
 
-    Graph->NotifyGraphChanged(EPCGChangeType::Settings);
+    #if WITH_EDITOR
+    Graph->ForceNotificationForEditor(EPCGChangeType::Settings);
+#endif
     Graph->GetPackage()->MarkPackageDirty();
 
     TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
@@ -203,7 +205,7 @@ TSharedPtr<FJsonObject> FPCGParameterManager::SetGraphParameter(const TSharedPtr
     }
 
     // Get mutable access to the user parameters
-    FInstancedPropertyBag* UserParams = Graph->GetMutableUserParametersStruct();
+    FInstancedPropertyBag* UserParams = Graph->GetMutableUserParametersStruct_Unsafe();
     if (!UserParams)
     {
         return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
@@ -293,7 +295,7 @@ TSharedPtr<FJsonObject> FPCGParameterManager::SetGraphParameter(const TSharedPtr
         FString StrValue;
         if (DefaultValue->TryGetString(StrValue))
         {
-            bSuccess = (UserParams->SetValueSerialize(FName(*ParamName), StrValue) == EPropertyBagResult::Success);
+            bSuccess = (UserParams->SetValueSerializedString(FName(*ParamName), StrValue) == EPropertyBagResult::Success);
             ValueStr = StrValue;
         }
         break;
@@ -306,7 +308,9 @@ TSharedPtr<FJsonObject> FPCGParameterManager::SetGraphParameter(const TSharedPtr
             FString::Printf(TEXT("Failed to set value for parameter '%s'"), *ParamName));
     }
 
-    Graph->NotifyGraphChanged(EPCGChangeType::Settings);
+    #if WITH_EDITOR
+    Graph->ForceNotificationForEditor(EPCGChangeType::Settings);
+#endif
     Graph->GetPackage()->MarkPackageDirty();
 
     TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject);
