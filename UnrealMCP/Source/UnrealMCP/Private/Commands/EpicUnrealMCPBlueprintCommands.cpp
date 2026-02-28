@@ -28,6 +28,7 @@
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
+#include "Engine/UserDefinedEnum.h"
 
 static FString GetVariableTypeString(const FEdGraphPinType& VarType)
 {
@@ -134,8 +135,12 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleCommand(const FSt
     {
         return HandleGetBlueprintComponentProperties(Params);
     }
+    else if (CommandType == TEXT("read_enum_asset"))
+    {
+        return HandleReadEnumAsset(Params);
+    }
 
-    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown blueprint command: %s"), *CommandType));
+    return nullptr;
 }
 
 TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleCreateBlueprint(const TSharedPtr<FJsonObject>& Params)
@@ -1950,5 +1955,46 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleGetBlueprintCompo
     ResultObj->SetStringField(TEXT("component_name"), ComponentName);
     ResultObj->SetStringField(TEXT("component_class"), CompClass->GetPathName());
     ResultObj->SetObjectField(TEXT("properties"), PropertiesObj);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleReadEnumAsset(const TSharedPtr<FJsonObject>& Params)
+{
+    FString EnumPath;
+    if (!Params->TryGetStringField(TEXT("enum_path"), EnumPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'enum_path' parameter"));
+    }
+
+    UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(EnumPath);
+    UEnum* Enum = Cast<UEnum>(LoadedAsset);
+    if (!IsValid(Enum))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to load enum: %s"), *EnumPath));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("enum_name"), Enum->GetName());
+    ResultObj->SetStringField(TEXT("enum_path"), EnumPath);
+
+    UUserDefinedEnum* UserEnum = Cast<UUserDefinedEnum>(Enum);
+
+    TArray<TSharedPtr<FJsonValue>> ValuesArray;
+    // NumEnums() - 1 чтобы пропустить скрытый MAX-элемент, добавляемый UE автоматически
+    int32 Count = Enum->NumEnums() - 1;
+    for (int32 i = 0; i < Count; i++)
+    {
+        TSharedPtr<FJsonObject> ValueObj = MakeShared<FJsonObject>();
+        // UUserDefinedEnum хранит отображаемые имена отдельно от внутренних (NewEnumeratorX)
+        FString DisplayName = IsValid(UserEnum)
+            ? UserEnum->GetDisplayNameTextByIndex(i).ToString()
+            : Enum->GetNameStringByIndex(i);
+        ValueObj->SetStringField(TEXT("name"), DisplayName);
+        ValueObj->SetNumberField(TEXT("value"), static_cast<double>(Enum->GetValueByIndex(i)));
+        ValuesArray.Add(MakeShared<FJsonValueObject>(ValueObj));
+    }
+    ResultObj->SetArrayField(TEXT("values"), ValuesArray);
+    ResultObj->SetBoolField(TEXT("success"), true);
     return ResultObj;
 }

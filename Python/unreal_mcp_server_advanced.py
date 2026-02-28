@@ -1228,6 +1228,27 @@ def read_blueprint_content(
         return {"success": False, "message": str(e)}
 
 @mcp.tool()
+def read_enum_asset(enum_path: str) -> Dict[str, Any]:
+    """
+    Read a Blueprint Enum asset and return its values.
+
+    Args:
+        enum_path: Full asset path to the enum (e.g., "/Game/_Game/Components/E_TeamType")
+
+    Returns:
+        Dictionary with enum_name, enum_path, and values list [{name, value}]
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("read_enum_asset", {"enum_path": enum_path})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"read_enum_asset error: {e}")
+        return {"success": False, "message": str(e)}
+
+@mcp.tool()
 def analyze_blueprint_graph(
     blueprint_path: str,
     graph_name: str = "EventGraph",

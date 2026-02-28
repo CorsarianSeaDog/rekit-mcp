@@ -220,83 +220,28 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
                 ResultJson = MakeShareable(new FJsonObject);
                 ResultJson->SetStringField(TEXT("message"), TEXT("pong"));
             }
-            // Editor Commands (including actor manipulation)
-            else if (CommandType == TEXT("get_actors_in_level") ||
-                     CommandType == TEXT("find_actors_by_name") ||
-                     CommandType == TEXT("spawn_actor") ||
-                     CommandType == TEXT("delete_actor") ||
-                     CommandType == TEXT("set_actor_transform") ||
-                     CommandType == TEXT("spawn_blueprint_actor") ||
-                     CommandType == TEXT("list_content_browser_meshes") ||
-                     CommandType == TEXT("get_actor_details") ||
-                     CommandType == TEXT("duplicate_actor") ||
-                     CommandType == TEXT("take_screenshot"))
-            {
-                ResultJson = EditorCommands->HandleCommand(CommandType, Params);
-            }
-            // Blueprint Commands
-            else if (CommandType == TEXT("create_blueprint") ||
-                     CommandType == TEXT("add_component_to_blueprint") ||
-                     CommandType == TEXT("set_physics_properties") ||
-                     CommandType == TEXT("compile_blueprint") ||
-                     CommandType == TEXT("set_static_mesh_properties") ||
-                     CommandType == TEXT("set_mesh_material_color") ||
-                     CommandType == TEXT("get_available_materials") ||
-                     CommandType == TEXT("apply_material_to_actor") ||
-                     CommandType == TEXT("apply_material_to_blueprint") ||
-                     CommandType == TEXT("get_actor_material_info") ||
-                     CommandType == TEXT("get_blueprint_material_info") ||
-                     CommandType == TEXT("read_blueprint_content") ||
-                     CommandType == TEXT("analyze_blueprint_graph") ||
-                     CommandType == TEXT("get_blueprint_variable_details") ||
-                     CommandType == TEXT("get_blueprint_function_details") ||
-                     CommandType == TEXT("set_blueprint_component_class") ||
-                     CommandType == TEXT("get_blueprint_component_properties"))
-            {
-                ResultJson = BlueprintCommands->HandleCommand(CommandType, Params);
-            }
-            // Blueprint Graph Commands
-            else if (CommandType == TEXT("add_blueprint_node") ||
-                     CommandType == TEXT("connect_nodes") ||
-                     CommandType == TEXT("create_variable") ||
-                     CommandType == TEXT("set_blueprint_variable_properties") ||
-                     CommandType == TEXT("add_event_node") ||
-                     CommandType == TEXT("delete_node") ||
-                     CommandType == TEXT("set_node_property") ||
-                     CommandType == TEXT("create_function") ||
-                     CommandType == TEXT("add_function_input") ||
-                     CommandType == TEXT("add_function_output") ||
-                     CommandType == TEXT("delete_function") ||
-                     CommandType == TEXT("rename_function"))
-            {
-                ResultJson = BlueprintGraphCommands->HandleCommand(CommandType, Params);
-            }
-            // PCG Graph Commands
-            else if (CommandType == TEXT("create_pcg_graph") ||
-                     CommandType == TEXT("read_pcg_graph") ||
-                     CommandType == TEXT("add_pcg_node") ||
-                     CommandType == TEXT("connect_pcg_nodes") ||
-                     CommandType == TEXT("set_pcg_node_property") ||
-                     CommandType == TEXT("delete_pcg_node") ||
-                     CommandType == TEXT("add_pcg_graph_parameter") ||
-                     CommandType == TEXT("set_pcg_graph_parameter") ||
-                     CommandType == TEXT("assign_pcg_graph") ||
-                     CommandType == TEXT("set_pcg_spawner_entries") ||
-                     CommandType == TEXT("generate_pcg") ||
-                     CommandType == TEXT("get_pcg_node_property"))
-            {
-                ResultJson = PCGGraphCommands->HandleCommand(CommandType, Params);
-            }
+            // Try each handler in order; each returns nullptr for unknown commands
             else
             {
-                ResponseJson->SetStringField(TEXT("status"), TEXT("error"));
-                ResponseJson->SetStringField(TEXT("error"), FString::Printf(TEXT("Unknown command: %s"), *CommandType));
-                
-                FString ResultString;
-                TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ResultString);
-                FJsonSerializer::Serialize(ResponseJson.ToSharedRef(), Writer);
-                Promise.SetValue(ResultString);
-                return;
+                ResultJson = EditorCommands->HandleCommand(CommandType, Params);
+                if (!ResultJson.IsValid())
+                    ResultJson = BlueprintCommands->HandleCommand(CommandType, Params);
+                if (!ResultJson.IsValid())
+                    ResultJson = BlueprintGraphCommands->HandleCommand(CommandType, Params);
+                if (!ResultJson.IsValid())
+                    ResultJson = PCGGraphCommands->HandleCommand(CommandType, Params);
+
+                if (!ResultJson.IsValid())
+                {
+                    ResponseJson->SetStringField(TEXT("status"), TEXT("error"));
+                    ResponseJson->SetStringField(TEXT("error"), FString::Printf(TEXT("Unknown command: %s"), *CommandType));
+
+                    FString ResultString;
+                    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ResultString);
+                    FJsonSerializer::Serialize(ResponseJson.ToSharedRef(), Writer);
+                    Promise.SetValue(ResultString);
+                    return;
+                }
             }
             
             // Check if the result contains an error

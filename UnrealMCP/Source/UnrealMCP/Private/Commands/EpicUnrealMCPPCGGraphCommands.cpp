@@ -57,7 +57,7 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPPCGGraphCommands::HandleCommand(const FStr
         return HandleSetPCGSpawnerEntries(Params);
     }
 
-    return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown PCG graph command: %s"), *CommandType));
+    return nullptr;
 }
 
 TSharedPtr<FJsonObject> FEpicUnrealMCPPCGGraphCommands::HandleCreatePCGGraph(const TSharedPtr<FJsonObject>& Params)
