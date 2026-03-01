@@ -55,6 +55,7 @@
 #include "Commands/EpicUnrealMCPBlueprintCommands.h"
 #include "Commands/EpicUnrealMCPBlueprintGraphCommands.h"
 #include "Commands/EpicUnrealMCPPCGGraphCommands.h"
+#include "Commands/EpicUnrealMCPBuildCommands.h"
 #include "Commands/EpicUnrealMCPCommonUtils.h"
 
 // Default settings
@@ -67,6 +68,7 @@ UEpicUnrealMCPBridge::UEpicUnrealMCPBridge()
     BlueprintCommands = MakeShared<FEpicUnrealMCPBlueprintCommands>();
     BlueprintGraphCommands = MakeShared<FEpicUnrealMCPBlueprintGraphCommands>();
     PCGGraphCommands = MakeShared<FEpicUnrealMCPPCGGraphCommands>();
+    BuildCommands = MakeShared<FEpicUnrealMCPBuildCommands>();
 }
 
 UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
@@ -75,6 +77,7 @@ UEpicUnrealMCPBridge::~UEpicUnrealMCPBridge()
     BlueprintCommands.Reset();
     BlueprintGraphCommands.Reset();
     PCGGraphCommands.Reset();
+    BuildCommands.Reset();
 }
 
 // Initialize subsystem
@@ -230,6 +233,8 @@ FString UEpicUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const T
                     ResultJson = BlueprintGraphCommands->HandleCommand(CommandType, Params);
                 if (!ResultJson.IsValid())
                     ResultJson = PCGGraphCommands->HandleCommand(CommandType, Params);
+                if (!ResultJson.IsValid())
+                    ResultJson = BuildCommands->HandleCommand(CommandType, Params);
 
                 if (!ResultJson.IsValid())
                 {

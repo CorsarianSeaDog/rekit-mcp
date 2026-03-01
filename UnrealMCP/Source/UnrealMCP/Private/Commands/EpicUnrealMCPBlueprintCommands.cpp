@@ -29,6 +29,9 @@
 #include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/UserDefinedEnum.h"
+#include "Engine/UserDefinedStruct.h"
+#include "StructUtils/UserDefinedStruct.h"
+#include "UObject/UnrealType.h"
 
 static FString GetVariableTypeString(const FEdGraphPinType& VarType)
 {
@@ -138,6 +141,10 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleCommand(const FSt
     else if (CommandType == TEXT("read_enum_asset"))
     {
         return HandleReadEnumAsset(Params);
+    }
+    else if (CommandType == TEXT("read_struct_asset"))
+    {
+        return HandleReadStructAsset(Params);
     }
 
     return nullptr;
@@ -1995,6 +2002,110 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleReadEnumAsset(con
         ValuesArray.Add(MakeShared<FJsonValueObject>(ValueObj));
     }
     ResultObj->SetArrayField(TEXT("values"), ValuesArray);
+    ResultObj->SetBoolField(TEXT("success"), true);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleReadStructAsset(const TSharedPtr<FJsonObject>& Params)
+{
+    FString StructPath;
+    if (!Params->TryGetStringField(TEXT("struct_path"), StructPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'struct_path' parameter"));
+    }
+
+    UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(StructPath);
+    UUserDefinedStruct* Struct = Cast<UUserDefinedStruct>(LoadedAsset);
+    if (!IsValid(Struct))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to load struct: %s"), *StructPath));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("struct_name"), Struct->GetName());
+    ResultObj->SetStringField(TEXT("struct_path"), StructPath);
+
+    TArray<TSharedPtr<FJsonValue>> FieldsArray;
+    for (TFieldIterator<FProperty> It(Struct); It; ++It)
+    {
+        FProperty* Prop = *It;
+        if (!Prop)
+        {
+            continue;
+        }
+
+        TSharedPtr<FJsonObject> FieldObj = MakeShared<FJsonObject>();
+        FieldObj->SetStringField(TEXT("name"), Prop->GetAuthoredName());
+        FieldObj->SetStringField(TEXT("cpp_type"), Prop->GetCPPType());
+
+        // Resolve inner type for containers
+        FString CategoryName;
+        FString SubType;
+        if (const FArrayProperty* ArrayProp = CastField<FArrayProperty>(Prop))
+        {
+            CategoryName = TEXT("Array");
+            SubType = ArrayProp->Inner ? ArrayProp->Inner->GetCPPType() : TEXT("Unknown");
+        }
+        else if (const FSetProperty* SetProp = CastField<FSetProperty>(Prop))
+        {
+            CategoryName = TEXT("Set");
+            SubType = SetProp->ElementProp ? SetProp->ElementProp->GetCPPType() : TEXT("Unknown");
+        }
+        else if (const FMapProperty* MapProp = CastField<FMapProperty>(Prop))
+        {
+            CategoryName = TEXT("Map");
+            FString KeyType = MapProp->KeyProp ? MapProp->KeyProp->GetCPPType() : TEXT("Unknown");
+            FString ValType = MapProp->ValueProp ? MapProp->ValueProp->GetCPPType() : TEXT("Unknown");
+            SubType = FString::Printf(TEXT("%s, %s"), *KeyType, *ValType);
+        }
+        else if (const FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+        {
+            CategoryName = TEXT("Struct");
+            SubType = StructProp->Struct ? StructProp->Struct->GetName() : TEXT("Unknown");
+        }
+        else if (const FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
+        {
+            CategoryName = TEXT("Object");
+            SubType = ObjProp->PropertyClass ? ObjProp->PropertyClass->GetName() : TEXT("Unknown");
+        }
+        else if (const FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(Prop))
+        {
+            CategoryName = TEXT("SoftObject");
+            SubType = SoftProp->PropertyClass ? SoftProp->PropertyClass->GetName() : TEXT("Unknown");
+        }
+        else if (const FEnumProperty* EnumProp = CastField<FEnumProperty>(Prop))
+        {
+            CategoryName = TEXT("Enum");
+            SubType = EnumProp->GetEnum() ? EnumProp->GetEnum()->GetName() : TEXT("Unknown");
+        }
+        else
+        {
+            CategoryName = Prop->GetClass()->GetName();
+        }
+
+        FieldObj->SetStringField(TEXT("category"), CategoryName);
+        if (!SubType.IsEmpty())
+        {
+            FieldObj->SetStringField(TEXT("sub_type"), SubType);
+        }
+
+        // Serialize default value as string
+        const uint8* DefaultData = Struct->GetDefaultInstance();
+        if (DefaultData)
+        {
+            FString DefaultValue;
+            Prop->ExportTextItem_InContainer(DefaultValue, DefaultData, nullptr, nullptr, PPF_None);
+            if (!DefaultValue.IsEmpty())
+            {
+                FieldObj->SetStringField(TEXT("default_value"), DefaultValue);
+            }
+        }
+
+        FieldsArray.Add(MakeShared<FJsonValueObject>(FieldObj));
+    }
+
+    ResultObj->SetArrayField(TEXT("fields"), FieldsArray);
     ResultObj->SetBoolField(TEXT("success"), true);
     return ResultObj;
 }

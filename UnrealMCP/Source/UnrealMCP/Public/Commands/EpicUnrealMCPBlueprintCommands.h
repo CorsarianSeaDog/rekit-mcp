@@ -37,6 +37,7 @@ private:
     TSharedPtr<FJsonObject> HandleGetBlueprintVariableDetails(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleGetBlueprintFunctionDetails(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleReadEnumAsset(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleReadStructAsset(const TSharedPtr<FJsonObject>& Params);
 
     // Blueprint component management
     TSharedPtr<FJsonObject> HandleSetBlueprintComponentClass(const TSharedPtr<FJsonObject>& Params);

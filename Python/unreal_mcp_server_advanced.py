@@ -1249,6 +1249,27 @@ def read_enum_asset(enum_path: str) -> Dict[str, Any]:
         return {"success": False, "message": str(e)}
 
 @mcp.tool()
+def read_struct_asset(struct_path: str) -> Dict[str, Any]:
+    """
+    Read a Blueprint Struct asset and return its fields with types and default values.
+
+    Args:
+        struct_path: Full asset path to the struct (e.g., "/Game/_Game/Components/S_RumorsContainer")
+
+    Returns:
+        Dictionary with struct_name, struct_path, and fields list [{name, category, cpp_type, sub_type?, default_value?}]
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+    try:
+        response = unreal.send_command("read_struct_asset", {"struct_path": struct_path})
+        return response or {"success": False, "message": "No response from Unreal"}
+    except Exception as e:
+        logger.error(f"read_struct_asset error: {e}")
+        return {"success": False, "message": str(e)}
+
+@mcp.tool()
 def analyze_blueprint_graph(
     blueprint_path: str,
     graph_name: str = "EventGraph",
@@ -4073,6 +4094,105 @@ def get_mesh_categories(
         "categories": data.get("category_counts", {}),
         "descriptions": data.get("category_descriptions", {}),
     }
+
+
+# ============================================================================
+# Build tools
+# ============================================================================
+
+_UE_LOG_FILE  = r"D:\UnrealEngine\Projects\SeaDogsRemake5.7\Saved\Logs\SeaDogsRemake.log"
+_UBT_LOG_FILE = os.path.join(os.environ.get("LOCALAPPDATA", ""), "UnrealBuildTool", "Log.txt")
+
+# Markers that signal compile completion in LogLiveCoding.
+_LC_SUCCESS_MARKERS = ["Live coding succeeded"]
+_LC_FAILURE_MARKERS = ["Live coding failed"]
+
+
+def _read_ubt_log(trigger_time: float) -> List[str]:
+    """Read UBT Log.txt if it was updated after trigger_time, return compiler errors/warnings."""
+    try:
+        if os.path.getmtime(_UBT_LOG_FILE) < trigger_time:
+            return []
+        with open(_UBT_LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        relevant = [l for l in content.splitlines()
+                    if any(t in l for t in ("error ", "warning ", "Error:", " failed", "Result:"))]
+        return relevant if relevant else content.splitlines()[-40:]
+    except OSError:
+        return []
+
+
+def _poll_log_for_result(start_pos: int, trigger_time: float, timeout: float = 120.0) -> Dict[str, Any]:
+    """
+    Poll the UE log file from start_pos until a LiveCoding completion marker
+    appears or the timeout expires.  Returns the captured log lines and result.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(0.5)
+        try:
+            with open(_UE_LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                f.seek(start_pos)
+                new_text = f.read()
+            if not new_text:
+                continue
+            lines = [l for l in new_text.splitlines() if "LogLiveCoding" in l]
+            for marker in _LC_SUCCESS_MARKERS:
+                if marker in new_text:
+                    return {"compile_success": True, "log": lines}
+            for marker in _LC_FAILURE_MARKERS:
+                if marker in new_text:
+                    return {"compile_success": False, "log": lines,
+                            "compiler_errors": _read_ubt_log(trigger_time)}
+        except OSError:
+            pass
+    return {"compile_success": False, "log": [], "message": f"Timed out after {timeout}s"}
+
+
+@mcp.tool()
+def trigger_live_coding() -> Dict[str, Any]:
+    """
+    Trigger Live Coding hot-reload and wait for the result by polling the UE log
+    file.  Returns compile_success and the relevant log lines.
+    Requires the Unreal Editor to be running.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine — is the editor running?"}
+
+    # Record log position and time before triggering so we only read new content.
+    trigger_time = time.time()
+    try:
+        log_start = os.path.getsize(_UE_LOG_FILE)
+    except OSError:
+        log_start = 0
+
+    try:
+        response = unreal.send_command("trigger_live_coding", {})
+    except Exception as e:
+        logger.error(f"trigger_live_coding send error: {e}")
+        return {"success": False, "message": str(e)}
+
+    if not response:
+        return {"success": False, "message": "No response from Unreal"}
+
+    result = response.get("result", {})
+    started = result.get("started", False)
+    compile_result = result.get("compile_result", "")
+
+    # NoChanges is returned synchronously — no need to poll.
+    if compile_result == "NoChanges":
+        return {"success": True, "compile_success": True, "compile_result": "NoChanges",
+                "log": ["Live coding succeeded, no code changes detected"]}
+
+    if not started:
+        return {"success": False, "compile_result": compile_result,
+                "message": f"Live Coding did not start: {compile_result}"}
+
+    # Compile started — poll the log file for the final result.
+    poll = _poll_log_for_result(log_start, trigger_time)
+    return {"success": True, **poll}
+
 
 
 # Run the server
