@@ -1323,6 +1323,55 @@ def analyze_blueprint_graph(
         return {"success": False, "message": str(e)}
 
 @mcp.tool()
+def read_composite_graph(
+    blueprint_path: str,
+    composite_name: str,
+) -> Dict[str, Any]:
+    """
+    Read the internal nodes and connections of a collapsed (composite) graph
+    inside a Blueprint's EventGraph.
+
+    Collapsed graphs (created via "Collapse Nodes" in the Blueprint editor) are
+    stored as UK2Node_Composite with an embedded BoundGraph that is NOT visible
+    through analyze_blueprint_graph. Use this tool whenever analyze_blueprint_graph
+    returns "Graph not found" for a node title that appears as a Collapsed Graph.
+
+    Args:
+        blueprint_path: Full path to the Blueprint asset (e.g. "/Game/Mode/BP_MyGameState")
+        composite_name: Name or title prefix of the collapsed graph node
+                        (e.g. "UpdateWavesHeightByWindStrength"). Matched against
+                        the BoundGraph internal name and the node's full title.
+
+    Returns:
+        Dictionary with graph_data containing nodes and connections of the
+        composite's BoundGraph, in the same format as analyze_blueprint_graph.
+    """
+    unreal = get_unreal_connection()
+    if not unreal:
+        return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+    try:
+        params = {
+            "blueprint_path": blueprint_path,
+            "composite_name": composite_name,
+        }
+
+        logger.info(f"Reading composite graph '{composite_name}' from {blueprint_path}")
+        response = unreal.send_command("read_composite_graph", params)
+
+        if response and response.get("success", False):
+            graph_data = response.get("graph_data", {})
+            logger.info(f"Composite graph read: {graph_data.get('graph_name', '?')}, "
+                        f"nodes={len(graph_data.get('nodes', []))}, "
+                        f"connections={len(graph_data.get('connections', []))}")
+
+        return response or {"success": False, "message": "No response from Unreal"}
+
+    except Exception as e:
+        logger.error(f"read_composite_graph error: {e}")
+        return {"success": False, "message": str(e)}
+
+@mcp.tool()
 def get_blueprint_variable_details(
     blueprint_path: str,
     variable_name: str = None

@@ -7,6 +7,7 @@
 #include "K2Node_Event.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
+#include "K2Node_Composite.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/SphereComponent.h"
@@ -121,6 +122,10 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleCommand(const FSt
     else if (CommandType == TEXT("analyze_blueprint_graph"))
     {
         return HandleAnalyzeBlueprintGraph(Params);
+    }
+    else if (CommandType == TEXT("read_composite_graph"))
+    {
+        return HandleReadCompositeGraph(Params);
     }
     else if (CommandType == TEXT("get_blueprint_variable_details"))
     {
@@ -1243,7 +1248,27 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleReadBlueprintCont
             TSharedPtr<FJsonObject> VarObj = MakeShared<FJsonObject>();
             VarObj->SetStringField(TEXT("name"), Variable.VarName.ToString());
             VarObj->SetStringField(TEXT("type"), GetVariableTypeString(Variable.VarType));
-            VarObj->SetStringField(TEXT("default_value"), Variable.DefaultValue);
+
+            // For primitive types, DefaultValue is stored directly on the variable description.
+            // For object references (SoundBase, NiagaraSystem, etc.) it is always empty there;
+            // the actual value lives in the CDO, so we fall back to reflection.
+            FString DefaultValue = Variable.DefaultValue;
+            if (DefaultValue.IsEmpty() && Blueprint->GeneratedClass)
+            {
+                if (UObject* CDO = Blueprint->GeneratedClass->GetDefaultObject(false))
+                {
+                    if (FProperty* Prop = Blueprint->GeneratedClass->FindPropertyByName(Variable.VarName))
+                    {
+                        const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CDO);
+                        Prop->ExportTextItem_Direct(DefaultValue, ValuePtr, nullptr, CDO, PPF_None);
+                        if (DefaultValue == TEXT("None"))
+                        {
+                            DefaultValue.Empty();
+                        }
+                    }
+                }
+            }
+            VarObj->SetStringField(TEXT("default_value"), DefaultValue);
             VarObj->SetStringField(TEXT("category"), Variable.Category.ToString());
             VarObj->SetBoolField(TEXT("is_editable"), (Variable.PropertyFlags & CPF_Edit) != 0);
             VarObj->SetBoolField(TEXT("is_editable_in_instance"), (Variable.PropertyFlags & CPF_DisableEditOnInstance) == 0);
@@ -1512,6 +1537,123 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleAnalyzeBlueprintG
 
     TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
     ResultObj->SetStringField(TEXT("blueprint_path"), BlueprintPath);
+    ResultObj->SetObjectField(TEXT("graph_data"), GraphData);
+    ResultObj->SetBoolField(TEXT("success"), true);
+
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleReadCompositeGraph(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintPath;
+    if (!Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_path' parameter"));
+    }
+
+    FString CompositeName;
+    if (!Params->TryGetStringField(TEXT("composite_name"), CompositeName))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'composite_name' parameter"));
+    }
+
+    UBlueprint* Blueprint = Cast<UBlueprint>(UEditorAssetLibrary::LoadAsset(BlueprintPath));
+    if (!Blueprint)
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load blueprint: %s"), *BlueprintPath));
+    }
+
+    // Search all UbergraphPages for a composite node matching composite_name
+    UK2Node_Composite* FoundComposite = nullptr;
+    for (UEdGraph* Graph : Blueprint->UbergraphPages)
+    {
+        if (!IsValid(Graph)) continue;
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            UK2Node_Composite* Composite = Cast<UK2Node_Composite>(Node);
+            if (!Composite || !IsValid(Composite->BoundGraph)) continue;
+
+            FString BoundName = Composite->BoundGraph->GetName();
+            FString NodeTitle = Composite->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+            if (BoundName == CompositeName || NodeTitle == CompositeName || NodeTitle.StartsWith(CompositeName))
+            {
+                FoundComposite = Composite;
+                break;
+            }
+        }
+        if (IsValid(FoundComposite)) break;
+    }
+
+    if (!IsValid(FoundComposite) || !IsValid(FoundComposite->BoundGraph))
+    {
+        return FEpicUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Composite graph not found: %s"), *CompositeName));
+    }
+
+    UEdGraph* BoundGraph = FoundComposite->BoundGraph;
+
+    TSharedPtr<FJsonObject> GraphData = MakeShared<FJsonObject>();
+    GraphData->SetStringField(TEXT("graph_name"), BoundGraph->GetName());
+    GraphData->SetStringField(TEXT("composite_title"), FoundComposite->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+
+    TArray<TSharedPtr<FJsonValue>> NodeArray;
+    TArray<TSharedPtr<FJsonValue>> ConnectionArray;
+
+    for (UEdGraphNode* Node : BoundGraph->Nodes)
+    {
+        if (!IsValid(Node)) continue;
+
+        TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
+        NodeObj->SetStringField(TEXT("name"), Node->GetName());
+        NodeObj->SetStringField(TEXT("class"), Node->GetClass()->GetName());
+        NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+        NodeObj->SetNumberField(TEXT("pos_x"), Node->NodePosX);
+        NodeObj->SetNumberField(TEXT("pos_y"), Node->NodePosY);
+
+        TArray<TSharedPtr<FJsonValue>> PinArray;
+        for (UEdGraphPin* Pin : Node->Pins)
+        {
+            if (!Pin) continue;
+
+            TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
+            PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
+            PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
+            PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"));
+            PinObj->SetNumberField(TEXT("connections"), Pin->LinkedTo.Num());
+            if (!Pin->DefaultValue.IsEmpty())
+            {
+                PinObj->SetStringField(TEXT("default_value"), Pin->DefaultValue);
+            }
+            if (Pin->DefaultObject)
+            {
+                PinObj->SetStringField(TEXT("default_object"), Pin->DefaultObject->GetName());
+                PinObj->SetStringField(TEXT("default_object_path"), Pin->DefaultObject->GetPathName());
+            }
+
+            for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+            {
+                if (LinkedPin && LinkedPin->GetOwningNode())
+                {
+                    TSharedPtr<FJsonObject> ConnObj = MakeShared<FJsonObject>();
+                    ConnObj->SetStringField(TEXT("from_node"), Pin->GetOwningNode()->GetName());
+                    ConnObj->SetStringField(TEXT("from_pin"), Pin->PinName.ToString());
+                    ConnObj->SetStringField(TEXT("to_node"), LinkedPin->GetOwningNode()->GetName());
+                    ConnObj->SetStringField(TEXT("to_pin"), LinkedPin->PinName.ToString());
+                    ConnectionArray.Add(MakeShared<FJsonValueObject>(ConnObj));
+                }
+            }
+
+            PinArray.Add(MakeShared<FJsonValueObject>(PinObj));
+        }
+        NodeObj->SetArrayField(TEXT("pins"), PinArray);
+        NodeArray.Add(MakeShared<FJsonValueObject>(NodeObj));
+    }
+
+    GraphData->SetArrayField(TEXT("nodes"), NodeArray);
+    GraphData->SetArrayField(TEXT("connections"), ConnectionArray);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("blueprint_path"), BlueprintPath);
+    ResultObj->SetStringField(TEXT("composite_name"), CompositeName);
     ResultObj->SetObjectField(TEXT("graph_data"), GraphData);
     ResultObj->SetBoolField(TEXT("success"), true);
 
