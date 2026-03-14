@@ -8,6 +8,7 @@
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "K2Node_Composite.h"
+#include "K2Node_Knot.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/SphereComponent.h"
@@ -1465,70 +1466,81 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleAnalyzeBlueprintG
     GraphData->SetStringField(TEXT("graph_name"), TargetGraph->GetName());
     GraphData->SetStringField(TEXT("graph_type"), TargetGraph->GetClass()->GetName());
 
-    // Analyze nodes
+    // Resolves a pin through chains of reroute (knot) nodes to the real destination pin.
+    auto ResolveKnot = [](UEdGraphPin* Pin) -> UEdGraphPin*
+    {
+        while (Pin)
+        {
+            UEdGraphNode* Owner = Pin->GetOwningNode();
+            if (!Owner || !Owner->IsA<UK2Node_Knot>()) return Pin;
+            UEdGraphPin* KnotOut = nullptr;
+            for (UEdGraphPin* P : Owner->Pins)
+            {
+                if (P && P->Direction == EGPD_Output) { KnotOut = P; break; }
+            }
+            Pin = (KnotOut && KnotOut->LinkedTo.Num() > 0) ? KnotOut->LinkedTo[0] : nullptr;
+        }
+        return nullptr;
+    };
+
+    // Returns true for self-pins that point at a static library CDO (always noise).
+    auto IsCDOSelfPin = [](const UEdGraphPin* Pin) -> bool
+    {
+        return Pin->PinName == TEXT("self")
+            && Pin->DefaultObject != nullptr
+            && Pin->DefaultObject->GetName().StartsWith(TEXT("Default__"));
+    };
+
     TArray<TSharedPtr<FJsonValue>> NodeArray;
     TArray<TSharedPtr<FJsonValue>> ConnectionArray;
 
     for (UEdGraphNode* Node : TargetGraph->Nodes)
     {
-        if (Node)
+        if (!Node || Node->IsA<UK2Node_Knot>()) continue;
+
+        TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
+        NodeObj->SetStringField(TEXT("name"), Node->GetName());
+        NodeObj->SetStringField(TEXT("class"), Node->GetClass()->GetName());
+        NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+
+        // Show only pins that carry configuration (non-empty default value).
+        // Connectivity is captured in the connections array instead.
+        TArray<TSharedPtr<FJsonValue>> PinArray;
+        for (UEdGraphPin* Pin : Node->Pins)
         {
-            TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
-            NodeObj->SetStringField(TEXT("name"), Node->GetName());
-            NodeObj->SetStringField(TEXT("class"), Node->GetClass()->GetName());
-            NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+            if (!Pin || Pin->DefaultValue.IsEmpty() || IsCDOSelfPin(Pin)) continue;
 
-            if (bIncludeNodeDetails)
+            TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
+            PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
+            PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
+            PinObj->SetStringField(TEXT("default_value"), Pin->DefaultValue);
+            PinArray.Add(MakeShared<FJsonValueObject>(PinObj));
+        }
+        if (PinArray.Num() > 0)
+        {
+            NodeObj->SetArrayField(TEXT("pins"), PinArray);
+        }
+
+        NodeArray.Add(MakeShared<FJsonValueObject>(NodeObj));
+
+        // Record connections only from Output pins to avoid duplicate entries.
+        // Reroute nodes are resolved transparently.
+        for (UEdGraphPin* Pin : Node->Pins)
+        {
+            if (!Pin || Pin->Direction != EGPD_Output || IsCDOSelfPin(Pin)) continue;
+            for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
             {
-                NodeObj->SetNumberField(TEXT("pos_x"), Node->NodePosX);
-                NodeObj->SetNumberField(TEXT("pos_y"), Node->NodePosY);
-                NodeObj->SetBoolField(TEXT("can_rename"), Node->bCanRenameNode);
-            }
+                if (!LinkedPin) continue;
+                UEdGraphPin* RealDest = ResolveKnot(LinkedPin);
+                if (!RealDest || !RealDest->GetOwningNode() || RealDest->GetOwningNode()->IsA<UK2Node_Knot>()) continue;
 
-            // Include pin information if requested
-            if (bIncludePinConnections)
-            {
-                TArray<TSharedPtr<FJsonValue>> PinArray;
-                for (UEdGraphPin* Pin : Node->Pins)
-                {
-                    if (Pin)
-                    {
-                        TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
-                        PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
-                        PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
-                        PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"));
-                        PinObj->SetNumberField(TEXT("connections"), Pin->LinkedTo.Num());
-                        if (!Pin->DefaultValue.IsEmpty())
-                        {
-                            PinObj->SetStringField(TEXT("default_value"), Pin->DefaultValue);
-                        }
-                        if (Pin->DefaultObject)
-                        {
-                            PinObj->SetStringField(TEXT("default_object"), Pin->DefaultObject->GetName());
-                            PinObj->SetStringField(TEXT("default_object_path"), Pin->DefaultObject->GetPathName());
-                        }
-                        
-                        // Record connections for this pin
-                        for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
-                        {
-                            if (LinkedPin && LinkedPin->GetOwningNode())
-                            {
-                                TSharedPtr<FJsonObject> ConnObj = MakeShared<FJsonObject>();
-                                ConnObj->SetStringField(TEXT("from_node"), Pin->GetOwningNode()->GetName());
-                                ConnObj->SetStringField(TEXT("from_pin"), Pin->PinName.ToString());
-                                ConnObj->SetStringField(TEXT("to_node"), LinkedPin->GetOwningNode()->GetName());
-                                ConnObj->SetStringField(TEXT("to_pin"), LinkedPin->PinName.ToString());
-                                ConnectionArray.Add(MakeShared<FJsonValueObject>(ConnObj));
-                            }
-                        }
-                        
-                        PinArray.Add(MakeShared<FJsonValueObject>(PinObj));
-                    }
-                }
-                NodeObj->SetArrayField(TEXT("pins"), PinArray);
+                TSharedPtr<FJsonObject> ConnObj = MakeShared<FJsonObject>();
+                ConnObj->SetStringField(TEXT("from_node"), Node->GetName());
+                ConnObj->SetStringField(TEXT("from_pin"), Pin->PinName.ToString());
+                ConnObj->SetStringField(TEXT("to_node"), RealDest->GetOwningNode()->GetName());
+                ConnObj->SetStringField(TEXT("to_pin"), RealDest->PinName.ToString());
+                ConnectionArray.Add(MakeShared<FJsonValueObject>(ConnObj));
             }
-
-            NodeArray.Add(MakeShared<FJsonValueObject>(NodeObj));
         }
     }
 
@@ -1595,57 +1607,75 @@ TSharedPtr<FJsonObject> FEpicUnrealMCPBlueprintCommands::HandleReadCompositeGrap
     GraphData->SetStringField(TEXT("graph_name"), BoundGraph->GetName());
     GraphData->SetStringField(TEXT("composite_title"), FoundComposite->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
 
+    auto ResolveKnotComposite = [](UEdGraphPin* Pin) -> UEdGraphPin*
+    {
+        while (Pin)
+        {
+            UEdGraphNode* Owner = Pin->GetOwningNode();
+            if (!Owner || !Owner->IsA<UK2Node_Knot>()) return Pin;
+            UEdGraphPin* KnotOut = nullptr;
+            for (UEdGraphPin* P : Owner->Pins)
+            {
+                if (P && P->Direction == EGPD_Output) { KnotOut = P; break; }
+            }
+            Pin = (KnotOut && KnotOut->LinkedTo.Num() > 0) ? KnotOut->LinkedTo[0] : nullptr;
+        }
+        return nullptr;
+    };
+
+    auto IsCDOSelfPinComposite = [](const UEdGraphPin* Pin) -> bool
+    {
+        return Pin->PinName == TEXT("self")
+            && Pin->DefaultObject != nullptr
+            && Pin->DefaultObject->GetName().StartsWith(TEXT("Default__"));
+    };
+
     TArray<TSharedPtr<FJsonValue>> NodeArray;
     TArray<TSharedPtr<FJsonValue>> ConnectionArray;
 
     for (UEdGraphNode* Node : BoundGraph->Nodes)
     {
-        if (!IsValid(Node)) continue;
+        if (!IsValid(Node) || Node->IsA<UK2Node_Knot>()) continue;
 
         TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
         NodeObj->SetStringField(TEXT("name"), Node->GetName());
         NodeObj->SetStringField(TEXT("class"), Node->GetClass()->GetName());
         NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
-        NodeObj->SetNumberField(TEXT("pos_x"), Node->NodePosX);
-        NodeObj->SetNumberField(TEXT("pos_y"), Node->NodePosY);
 
         TArray<TSharedPtr<FJsonValue>> PinArray;
         for (UEdGraphPin* Pin : Node->Pins)
         {
-            if (!Pin) continue;
-
+            if (!Pin || Pin->DefaultValue.IsEmpty() || IsCDOSelfPinComposite(Pin)) continue;
             TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
             PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
             PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
-            PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"));
-            PinObj->SetNumberField(TEXT("connections"), Pin->LinkedTo.Num());
-            if (!Pin->DefaultValue.IsEmpty())
-            {
-                PinObj->SetStringField(TEXT("default_value"), Pin->DefaultValue);
-            }
-            if (Pin->DefaultObject)
-            {
-                PinObj->SetStringField(TEXT("default_object"), Pin->DefaultObject->GetName());
-                PinObj->SetStringField(TEXT("default_object_path"), Pin->DefaultObject->GetPathName());
-            }
-
-            for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
-            {
-                if (LinkedPin && LinkedPin->GetOwningNode())
-                {
-                    TSharedPtr<FJsonObject> ConnObj = MakeShared<FJsonObject>();
-                    ConnObj->SetStringField(TEXT("from_node"), Pin->GetOwningNode()->GetName());
-                    ConnObj->SetStringField(TEXT("from_pin"), Pin->PinName.ToString());
-                    ConnObj->SetStringField(TEXT("to_node"), LinkedPin->GetOwningNode()->GetName());
-                    ConnObj->SetStringField(TEXT("to_pin"), LinkedPin->PinName.ToString());
-                    ConnectionArray.Add(MakeShared<FJsonValueObject>(ConnObj));
-                }
-            }
-
+            PinObj->SetStringField(TEXT("default_value"), Pin->DefaultValue);
             PinArray.Add(MakeShared<FJsonValueObject>(PinObj));
         }
-        NodeObj->SetArrayField(TEXT("pins"), PinArray);
+        if (PinArray.Num() > 0)
+        {
+            NodeObj->SetArrayField(TEXT("pins"), PinArray);
+        }
+
         NodeArray.Add(MakeShared<FJsonValueObject>(NodeObj));
+
+        for (UEdGraphPin* Pin : Node->Pins)
+        {
+            if (!Pin || Pin->Direction != EGPD_Output || IsCDOSelfPinComposite(Pin)) continue;
+            for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+            {
+                if (!LinkedPin) continue;
+                UEdGraphPin* RealDest = ResolveKnotComposite(LinkedPin);
+                if (!RealDest || !RealDest->GetOwningNode() || RealDest->GetOwningNode()->IsA<UK2Node_Knot>()) continue;
+
+                TSharedPtr<FJsonObject> ConnObj = MakeShared<FJsonObject>();
+                ConnObj->SetStringField(TEXT("from_node"), Node->GetName());
+                ConnObj->SetStringField(TEXT("from_pin"), Pin->PinName.ToString());
+                ConnObj->SetStringField(TEXT("to_node"), RealDest->GetOwningNode()->GetName());
+                ConnObj->SetStringField(TEXT("to_pin"), RealDest->PinName.ToString());
+                ConnectionArray.Add(MakeShared<FJsonValueObject>(ConnObj));
+            }
+        }
     }
 
     GraphData->SetArrayField(TEXT("nodes"), NodeArray);
