@@ -483,6 +483,7 @@ dependencies = [
     { name = "fastmcp" },
     { name = "mcp", extra = ["cli"] },
     { name = "pydantic" },
+    { name = "python-dotenv" },
     { name = "requests" },
     { name = "uvicorn" },
 ]
@@ -493,6 +494,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=0.2.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.4.1" },
     { name = "pydantic", specifier = ">=2.6.1" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "requests" },
     { name = "uvicorn" },
 ]

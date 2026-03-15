@@ -18,7 +18,11 @@ import ctypes
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Any, Optional, List
 import os
+import subprocess
 from ctypes import wintypes
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 from mcp.server.fastmcp import FastMCP, Image
 
 from helpers.infrastructure_creation import (
@@ -4149,7 +4153,9 @@ def get_mesh_categories(
 # Build tools
 # ============================================================================
 
-_UE_LOG_FILE  = r"D:\UnrealEngine\Projects\SeaDogsRemake5.7\Saved\Logs\SeaDogsRemake.log"
+_UE_ROOT      = os.getenv("UE_ROOT", r"D:\UnrealEngine\Engines\UE_5.7")
+_PROJECT_ROOT = os.getenv("PROJECT_ROOT", r"D:\UnrealEngine\Projects\SeaDogsRemake5.7")
+_UE_LOG_FILE  = os.getenv("UE_LOG_FILE", os.path.join(_PROJECT_ROOT, "Saved", "Logs", "SeaDogsRemake.log"))
 _UBT_LOG_FILE = os.path.join(os.environ.get("LOCALAPPDATA", ""), "UnrealBuildTool", "Log.txt")
 
 # Markers that signal compile completion in LogLiveCoding.
@@ -4199,48 +4205,94 @@ def _poll_log_for_result(start_pos: int, trigger_time: float, timeout: float = 1
 
 
 @mcp.tool()
-def trigger_live_coding() -> Dict[str, Any]:
+def build_project(force_full: bool = False) -> Dict[str, Any]:
     """
-    Trigger Live Coding hot-reload and wait for the result by polling the UE log
-    file.  Returns compile_success and the relevant log lines.
-    Requires the Unreal Editor to be running.
-    """
-    unreal = get_unreal_connection()
-    if not unreal:
-        return {"success": False, "message": "Failed to connect to Unreal Engine — is the editor running?"}
+    Build the Unreal Engine project.
 
-    # Record log position and time before triggering so we only read new content.
+    - If the Unreal Editor is running and force_full=False: triggers Live Coding (hot-reload).
+    - Otherwise: runs a full build via UnrealBuildTool (editor must be closed).
+
+    Args:
+        force_full: Force a full UBT build even if the editor is running (use when .Build.cs module dependencies changed).
+
+    Returns:
+        Dict with compile_success (bool), log (list of strings), and compiler_errors on failure.
+    """
+    # Quick port probe (0.5s) to avoid multi-retry hang when editor is closed.
+    editor_reachable = False
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.settimeout(0.5)
+        editor_reachable = probe.connect_ex((UNREAL_HOST, UNREAL_PORT)) == 0
+        probe.close()
+    except OSError:
+        pass
+
+    unreal = get_unreal_connection() if editor_reachable else None
+
+    if unreal and not force_full:
+        # Live Coding via running editor
+        trigger_time = time.time()
+        try:
+            log_start = os.path.getsize(_UE_LOG_FILE)
+        except OSError:
+            log_start = 0
+
+        try:
+            response = unreal.send_command("trigger_live_coding", {})
+        except Exception as e:
+            return {"compile_success": False, "message": str(e)}
+
+        if not response:
+            return {"compile_success": False, "message": "No response from Unreal"}
+
+        result = response.get("result", {})
+        started = result.get("started", False)
+        compile_result = result.get("compile_result", "")
+
+        if compile_result == "NoChanges":
+            return {"compile_success": True, "compile_result": "NoChanges",
+                    "log": ["Live coding succeeded, no code changes detected"]}
+
+        if not started:
+            return {"compile_success": False, "compile_result": compile_result,
+                    "message": f"Live Coding did not start: {compile_result}"}
+
+        poll = _poll_log_for_result(log_start, trigger_time)
+        return {"compile_success": poll.get("compile_success", False), **poll}
+
+    # Full build via UnrealBuildTool.
+    # Avoid capture_output=True — on Windows with MCP stdio transport, dotnet child processes
+    # can inherit the pipe and cause a deadlock. Write to temp files instead.
+    build_bat = os.path.join(_UE_ROOT, "Engine", "Build", "BatchFiles", "Build.bat")
+    project_file = os.path.join(_PROJECT_ROOT, "SeaDogsRemake.uproject")
+    cmd = [build_bat, "SeaDogsRemakeEditor", "Win64", "Development",
+           f"-Project={project_file}", "-WaitMutex", "-FromMsBuild", "-architecture=x64"]
+
+    import tempfile
     trigger_time = time.time()
     try:
-        log_start = os.path.getsize(_UE_LOG_FILE)
-    except OSError:
-        log_start = 0
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="ignore") as out_f:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=out_f,
+                stderr=out_f,
+                stdin=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            try:
+                returncode = proc.wait(timeout=600)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                return {"compile_success": False, "log": [], "message": "Build timed out after 600s"}
+            out_f.seek(0)
+            output_lines = out_f.read().splitlines()
 
-    try:
-        response = unreal.send_command("trigger_live_coding", {})
+        errors = _read_ubt_log(trigger_time)
+        success = returncode == 0
+        return {"compile_success": success, "log": output_lines, "compiler_errors": errors}
     except Exception as e:
-        logger.error(f"trigger_live_coding send error: {e}")
-        return {"success": False, "message": str(e)}
-
-    if not response:
-        return {"success": False, "message": "No response from Unreal"}
-
-    result = response.get("result", {})
-    started = result.get("started", False)
-    compile_result = result.get("compile_result", "")
-
-    # NoChanges is returned synchronously — no need to poll.
-    if compile_result == "NoChanges":
-        return {"success": True, "compile_success": True, "compile_result": "NoChanges",
-                "log": ["Live coding succeeded, no code changes detected"]}
-
-    if not started:
-        return {"success": False, "compile_result": compile_result,
-                "message": f"Live Coding did not start: {compile_result}"}
-
-    # Compile started — poll the log file for the final result.
-    poll = _poll_log_for_result(log_start, trigger_time)
-    return {"success": True, **poll}
+        return {"compile_success": False, "log": [], "message": str(e)}
 
 
 
